@@ -14,7 +14,8 @@ keybow = PMK(Hardware())
 keys = keybow.keys
 
 # Set USB MIDI up on channel 0.
-midi = adafruit_midi.MIDI(midi_out=usb_midi.ports[1])
+midi = adafruit_midi.MIDI(midi_out=usb_midi.ports[1], out_channel=0)
+bass_midi = adafruit_midi.MIDI(midi_out=usb_midi.ports[1], out_channel=1)
 
 # The colour to set the keys when pressed, orange-y.
 rgb = (255, 255, 0)
@@ -44,14 +45,26 @@ class M:
                 (lambda prev: [start_note - 12, start_note - 5] if random.random() < 0.8 else [start_note + 24], 0.1),
                 (0, 0.1)]
 
+    def bass_notes(self):
+        return [(start_note - 12, 0.25),
+                (None, 0.0),
+                (start_note + 3 - 12, 0.1),
+                (0, 0.1),
+                (start_note - 12, 0.25),
+                (None, 0.0),
+                (start_note - 5 - 12, 0.1),
+                (0, 0.1), (0, 0.0)]
+
 this_note = last_note = 0
 
 last_note_time = 0
 last_note_pitches = []
+last_bass_note = None
 
 melody = M()
 
 notes = melody.notes()
+bass_notes = melody.bass_notes()
 
 for key in keys:
     @keybow.on_press(key)
@@ -118,6 +131,7 @@ while True:
             print("")
 
         this_note_pitches, this_note_length = notes[this_note]
+        bass_note_pitch, bass_note_length = bass_notes[this_note]
         
         this_note_time = 60 / bpm * (this_note_length)
 
@@ -130,6 +144,8 @@ while True:
         for p in last_note_pitches:
             if p:
                 midi.send(NoteOff(p, 0))
+        if last_bass_note is not None:
+            bass_midi.send(NoteOff(last_bass_note, 0))
 
         keys[last_note].set_led(0,0,0)
 
@@ -137,10 +153,13 @@ while True:
             if p != 0:
                 midi.send(NoteOn(p, velocity))
             keys[this_note].set_led(*rgb)
+        if bass_note_pitch is not None:
+            bass_midi.send(NoteOn(bass_note_pitch, velocity))
 
         # Update time last_played, make this note last note
         last_played = time.monotonic()
         last_note_pitches = this_note_pitches
+        last_bass_note = bass_note_pitch
         last_note_time = this_note_time
         last_note = this_note
         this_note += 1
