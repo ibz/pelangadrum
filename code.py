@@ -1,166 +1,194 @@
 import random
 import time
 
-from pmk import PMK
-from pmk.platform.keybow2040 import Keybow2040 as Hardware
-
-import usb_midi
 import adafruit_midi
 from adafruit_midi.note_off import NoteOff
 from adafruit_midi.note_on import NoteOn
 from adafruit_midi.timing_clock import TimingClock
+from pmk import PMK
+from pmk.platform.keybow2040 import Keybow2040
+import usb_midi
 
-keybow = PMK(Hardware())
-keys = keybow.keys
+keybow = PMK(Keybow2040())
 
-# Set USB MIDI up on channel 0.
-midi = adafruit_midi.MIDI(midi_out=usb_midi.ports[1], out_channel=0)
-bass_midi = adafruit_midi.MIDI(midi_out=usb_midi.ports[1], out_channel=1)
+class Note:
+    def __init__(self, pitch, velocity=100):
+        self.pitch = pitch
+        self.velocity = velocity
 
-# The colour to set the keys when pressed, orange-y.
-rgb = (255, 255, 0)
+    def __eq__(self, other):
+        if isinstance(other, Note):
+            return self.pitch == other.pitch
+        else:
+            return self.pitch == other
 
-# MIDI velocity.
-start_note = 31
-velocity = 100
+class Step:
+    def __init__(self, notes, duration):
+        self.notes = notes
+        self.duration = duration
 
-bpm = 30
+class Sequence:
+    def __init__(self):
+        self.tonic = 31 + 12
 
-last_pulse_sent = 0
-last_played = 0
-last_pressed = []
+    def generate(self):
+        steps = []
+        steps.append(Step([Note(self.tonic)], 0.15))
+        steps.append(Step([Note(self.tonic)], 0.1))
+        if random.random() < 0.5:
+            steps.append(Step([Note(self.tonic + 3), Note(self.tonic)], 0.1))
+        else:
+            steps.append(Step([Note(self.tonic + 7), Note(self.tonic + 3)], 0.1))
+        steps.append(Step([], 0.1))
+        if random.random() < 0.3:
+            if random.random() < 0.8:
+                steps.append(Step([Note(self.tonic)], 0.1))
+            else:
+                steps.append(Step([Note(self.tonic + 7)], 0.1))
+            steps.append(Step([Note(steps[-1].notes[0].pitch)], 0.05))
+        else:
+            if random.random() < 0.9:
+                steps.append(Step([Note(self.tonic)], 0.15))
+            else:
+                steps.append(Step([Note(self.tonic + 7)], 0.15))
+        steps.append(Step([Note(steps[-1].notes[0].pitch)], 0.1))
+        if random.random() < 0.8:
+            steps.append(Step([Note(self.tonic - 5), Note(self.tonic - 12)], 0.1))
+        else:
+            steps.append(Step([Note(self.tonic + 24)], 0.1))
+        steps.append(Step([], 0.1))
+        return steps
 
-class M:
-    def notes(self):
-        return [(start_note, 0.15),
-                (start_note, 0.1),
-                (lambda prev: [start_note + 0, start_note + 3] if random.random() < 0.5 else [start_note + 3, start_note + 7], 0.1),
-                (0, 0.1)
-                ] + \
-              ([
-                (lambda prev: start_note if (start_note in prev or random.random() < 0.8) else start_note + 7, 0.1),
-                (lambda prev: prev[0], 0.05)] if random.random() < 0.3 else [
-                    (lambda prev: start_note if start_note not in prev and random.random() < 0.9 else start_note + 7, 0.15)]) + \
-               [(lambda prev: prev[0], 0.1),
-                (lambda prev: [start_note - 12, start_note - 5] if random.random() < 0.8 else [start_note + 24], 0.1),
-                (0, 0.1)]
+class BassSequence:
+    def __init__(self):
+        self.tonic = 31
+        self.i = 0
 
-    def bass_notes(self):
-        return [(start_note - 12, 0.25),
-                (None, 0.0),
-                (start_note + 3 - 12, 0.1),
-                (0, 0.1),
-                (start_note - 12, 0.25),
-                (None, 0.0),
-                (start_note - 5 - 12, 0.1),
-                (0, 0.1), (0, 0.0)]
+    def generate(self):
+        steps = []
+        steps.append(Step([Note(self.tonic - 24)], 0.25))
+        steps.append(Step([Note(self.tonic + 3 - 24)], 0.1))
+        steps.append(Step([], 0.1))
+        if self.i == 0 or self.i == 2:
+            steps.append(Step([Note(self.tonic - 24)], 0.25))
+            steps.append(Step([Note(self.tonic - 5 - 24)], 0.1))
+        elif self.i == 1:
+            steps.append(Step([Note(self.tonic - 24 + 7)], 0.35))
+        elif self.i == 3:
+            steps.append(Step([Note(self.tonic - 24)], 0.35))
+        steps.append(Step([], 0.1))
+        self.i += 1
+        if self.i > 3:
+            self.i = 0
+        return steps
 
-this_note = last_note = 0
+class Performer:
+    def __init__(self, sequence, bpm, midi, keybow, color):
+        self.sequence = sequence
+        self.bpm = bpm
+        self.midi = midi
+        self.keybow = keybow
+        self.color = color
+        self.polyphonic = True
 
-last_note_time = 0
-last_note_pitches = []
-last_bass_note = None
+    def start(self):
+        self.start_time = time.monotonic()
+        self.last_step_time = 0
+        self.last_played = 0
+        self.last_pulse_sent = 0
+        if self.sequence:
+            self.steps = self.sequence.generate()
+        self.index = 0
+        self.last_index = 0
+        self.last_step = None
+        self.pulses = 0
 
-melody = M()
+    def tick(self, monotonic):
+        if monotonic - self.last_pulse_sent > 60 / self.bpm * WHOLE_NOTE / PPQN / 4:
+            if self.pulses < PPWN:
+                self.midi.send(TimingClock())
+                self.last_pulse_sent = monotonic
+                self.pulses += 1
+        if monotonic - self.last_played > self.last_step_time:
+            if self.index == len(self.steps):
+                while self.pulses < PPWN:
+                    self.midi.send(TimingClock())
+                    self.pulses += 1
+                self.index = 0
+                self.pulses = 0
+                self.steps = self.sequence.generate()
 
-notes = melody.notes()
-bass_notes = melody.bass_notes()
+            if self.last_step:
+                for i, note in enumerate(self.last_step.notes):
+                    if i == 0 or self.polyphonic:
+                        self.midi.send(NoteOff(note.pitch, 0))
+                self.keybow.keys[self.last_index].set_led(0, 0, 0)
 
-for key in keys:
+            for i, note in enumerate(self.steps[self.index].notes):
+                if i == 0 or self.polyphonic:
+                    self.midi.send(NoteOn(note.pitch, note.velocity))
+
+            self.keybow.keys[self.index].set_led(*self.color)
+
+            self.last_played = monotonic
+            self.last_step = self.steps[self.index]
+            self.last_step_time = 60 / self.bpm * self.steps[self.index].duration
+            self.last_index = self.index
+            self.index += 1
+            return self.last_index
+
+for key in keybow.keys:
     @keybow.on_press(key)
     def press(key):
-        global bpm, start_note
-        if key.number == 12:
-            bpm -= 5
-        elif key.number == 13:
-            bpm += 5
-        elif key.number == 8:
-            bpm -= 1
-        elif key.number == 9:
-            bpm += 1
-        elif key.number == 14:
-            start_note -= 12
-        elif key.number == 15:
-            start_note += 12
-            print(key.number)
+        global performers
+        if key.number in (0, 1):
+            performers[key.number].polyphonic = not performers[key.number].polyphonic
+        for performer in performers:
+            if key.number == 12:
+                performer.bpm -= 5
+            elif key.number == 13:
+                performer.bpm += 5
+            elif key.number == 8:
+                performer.bpm -= 1
+            elif key.number == 9:
+                performer.bpm += 1
+            elif key.number == 14:
+                performer.sequence.tonic -= 12
+            elif key.number == 15:
+                performer.sequence.tonic += 12
 
-keys[8].set_led(128, 0, 0)
-keys[9].set_led(0, 128, 0)
-keys[12].set_led(255, 0, 0)
-keys[13].set_led(0, 255, 0)
+keybow.keys[8].set_led(128, 0, 0)
+keybow.keys[9].set_led(0, 128, 0)
+keybow.keys[12].set_led(255, 0, 0)
+keybow.keys[13].set_led(0, 255, 0)
 
-def ms_per_tick():
-  return 60000 / (bpm * 24)
-tp = 0
+performer = Performer(Sequence(), 30, adafruit_midi.MIDI(midi_out=usb_midi.ports[1], out_channel=0), keybow, (255, 255, 0))
+performer.start()
+
+bass_performer = Performer(BassSequence(), 30, adafruit_midi.MIDI(midi_out=usb_midi.ports[1], out_channel=1), keybow, (255, 0, 0))
+bass_performer.start()
+
+performers = [performer, bass_performer]
 
 WHOLE_NOTE = 0.9 # WTF
-
 PPQN = 24 # MIDI standard
 PPWN = PPQN * 4
 
-pulses = 0
-
 while True:
-    # Always remember to call keybow.update()!
-    keybow.update()
-    
-    monot = time.monotonic()
-    elapsed = monot - last_played
-    pulse_elapsed = monot - last_pulse_sent
+    keybow.update() # always remember to call keybow.update()!
 
-    whole_note_time = 60 / bpm * WHOLE_NOTE
+    monotonic = time.monotonic()
 
-    if pulse_elapsed > whole_note_time / PPQN / 4:
-        if pulses < PPQN * 4:
-            midi.send(TimingClock())
-            last_pulse_sent = time.monotonic()
-            pulses += 1
-            print("|" + str(pulses))
-        else:
-            print("?")
+    indices = []
+    for i, p in enumerate(performers):
+        index = p.tick(monotonic)
+        indices.append(index)
 
-    if elapsed > last_note_time:
-        if this_note == len(notes):
-            while pulses < PPQN * 4:
-                midi.send(TimingClock())
-                print("+" + str(pulses))
-                pulses += 1
-            this_note = 0
-            pulses = 0
-            notes = melody.notes()
-            print("")
-
-        this_note_pitches, this_note_length = notes[this_note]
-        bass_note_pitch, bass_note_length = bass_notes[this_note]
-        
-        this_note_time = 60 / bpm * (this_note_length)
-
-        if callable(this_note_pitches):
-            this_note_pitches = this_note_pitches(last_note_pitches)
-
-        if not isinstance(this_note_pitches, list):
-            this_note_pitches = [this_note_pitches]
-
-        for p in last_note_pitches:
-            if p:
-                midi.send(NoteOff(p, 0))
-        if last_bass_note is not None:
-            bass_midi.send(NoteOff(last_bass_note, 0))
-
-        keys[last_note].set_led(0,0,0)
-
-        for p in this_note_pitches:
-            if p != 0:
-                midi.send(NoteOn(p, velocity))
-            keys[this_note].set_led(*rgb)
-        if bass_note_pitch is not None:
-            bass_midi.send(NoteOn(bass_note_pitch, velocity))
-
-        # Update time last_played, make this note last note
-        last_played = time.monotonic()
-        last_note_pitches = this_note_pitches
-        last_bass_note = bass_note_pitch
-        last_note_time = this_note_time
-        last_note = this_note
-        this_note += 1
-
+    # when any of the performers arrived at the beginning of the sequence,
+    # we allow all others to advance until they also arrive there
+    while 0 in indices and any(index != 0 for index in indices):
+        monotonic = time.monotonic()
+        for i, p in enumerate(performers):
+            if indices[i] != 0:
+                index = p.tick(monotonic)
+                indices[i] = index
